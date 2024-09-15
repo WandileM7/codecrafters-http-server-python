@@ -44,12 +44,15 @@ def make_response(
         ),
     )
 
-async def handle_connection(reader: StreamReader, writer: StreamWriter) -> None:
+async def handle_connection(reader: StreamWriter, writer: StreamWriter) -> None:
     method, path, headers, body = parse_request(await reader.read(2**16))
 
-    # Check if the client accepts gzip encoding
+    # Parse Accept-Encoding header
     accept_encoding = headers.get("Accept-Encoding", "")
-    use_gzip = "gzip" in accept_encoding.lower()
+    supported_encodings = [encoding.strip().lower() for encoding in accept_encoding.split(',')]
+    
+    # Check if gzip is supported
+    use_gzip = "gzip" in supported_encodings
 
     response_headers = {}
     if use_gzip:
