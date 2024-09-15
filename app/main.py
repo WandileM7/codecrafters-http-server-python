@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import re
 import sys
+import gzip
 from asyncio.streams import StreamReader, StreamWriter
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def parse_request(content: bytes) -> tuple[str, str, dict[str, str], str]:
 def make_response(
     status: int,
     headers: dict[str, str] | None = None,
-    body: str = "",
+    body: bytes = b"",
 ) -> bytes:
     headers = headers or {}
     msg = {
@@ -31,28 +32,21 @@ def make_response(
         404: "Not Found",
     }
 
-    return b"\r\n".join(
-        map(
-            lambda i: i.encode(),
-            [
-                f"HTTP/1.1 {status} {msg[status]}",
-                *[f"{k}: {v}" for k, v in headers.items()],
-                f"Content-Length: {len(body)}",
-                "",
-                body,
-            ],
-        ),
+    header_str = "\r\n".join(
+        [f"HTTP/1.1 {status} {msg[status]}"] +
+        [f"{k}: {v}" for k, v in headers.items()] +
+        [f"Content-Length: {len(body)}"]
     )
+    
+    # Add the final CRLF after headers before the body
+    return f"{header_str}\r\n\r\n".encode() + body
 
-async def handle_connection(reader: StreamWriter, writer: StreamWriter) -> None:
+async def handle_connection(reader: StreamReader, writer: StreamWriter) -> None:
     method, path, headers, body = parse_request(await reader.read(2**16))
 
-    # Parse Accept-Encoding header
+    # Check if the client accepts gzip encoding
     accept_encoding = headers.get("Accept-Encoding", "")
-    supported_encodings = [encoding.strip().lower() for encoding in accept_encoding.split(',')]
-    
-    # Check if gzip is supported
-    use_gzip = "gzip" in supported_encodings
+    use_gzip = "gzip" in accept_encoding.lower()
 
     response_headers = {}
     if use_gzip:
@@ -63,20 +57,30 @@ async def handle_connection(reader: StreamWriter, writer: StreamWriter) -> None:
         stderr(f"[OUT] /")
     elif re.fullmatch(r"/user-agent", path):
         ua = headers["User-Agent"]
-        writer.write(make_response(200, {"Content-Type": "text/plain", **response_headers}, ua))
+        response_body = ua.encode()
+        if use_gzip:
+            response_body = gzip.compress(response_body)
+        writer.write(make_response(200, {"Content-Type": "text/plain", **response_headers}, response_body))
         stderr(f"[OUT] user-agent {ua}")
     elif match := re.fullmatch(r"/echo/(.+)", path):
-        msg = match.group(1)
+        msg = match.group(1).encode()  # Original message
+        stderr(f"[OUT] echo {msg.decode()}")  # Log the uncompressed message
+
+        if use_gzip:
+            msg = gzip.compress(msg)  # Compress the message if gzip is accepted
+
         writer.write(make_response(200, {"Content-Type": "text/plain", **response_headers}, msg))
-        stderr(f"[OUT] echo {msg}")
     elif match := re.fullmatch(r"/files/(.+)", path):
         p = Path(GLOBALS["DIR"]) / match.group(1)
         if method.upper() == "GET" and p.is_file():
+            file_content = p.read_text().encode()
+            if use_gzip:
+                file_content = gzip.compress(file_content)
             writer.write(
                 make_response(
                     200,
                     {"Content-Type": "application/octet-stream", **response_headers},
-                    p.read_text(),
+                    file_content,
                 )
             )
         elif method.upper() == "POST":
@@ -86,7 +90,7 @@ async def handle_connection(reader: StreamWriter, writer: StreamWriter) -> None:
             writer.write(make_response(404, response_headers))
         stderr(f"[OUT] file {path}")
     else:
-        writer.write(make_response(404, response_headers, ""))
+        writer.write(make_response(404, response_headers, b""))
         stderr(f"[OUT] 404")
 
     await writer.drain()
