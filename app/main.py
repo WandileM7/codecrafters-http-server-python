@@ -47,16 +47,24 @@ def make_response(
 async def handle_connection(reader: StreamReader, writer: StreamWriter) -> None:
     method, path, headers, body = parse_request(await reader.read(2**16))
 
+    # Check if the client accepts gzip encoding
+    accept_encoding = headers.get("Accept-Encoding", "")
+    use_gzip = "gzip" in accept_encoding.lower()
+
+    response_headers = {}
+    if use_gzip:
+        response_headers["Content-Encoding"] = "gzip"
+
     if re.fullmatch(r"/", path):
         writer.write(b"HTTP/1.1 200 OK\r\n\r\n")
         stderr(f"[OUT] /")
     elif re.fullmatch(r"/user-agent", path):
         ua = headers["User-Agent"]
-        writer.write(make_response(200, {"Content-Type": "text/plain"}, ua))
+        writer.write(make_response(200, {"Content-Type": "text/plain", **response_headers}, ua))
         stderr(f"[OUT] user-agent {ua}")
     elif match := re.fullmatch(r"/echo/(.+)", path):
         msg = match.group(1)
-        writer.write(make_response(200, {"Content-Type": "text/plain"}, msg))
+        writer.write(make_response(200, {"Content-Type": "text/plain", **response_headers}, msg))
         stderr(f"[OUT] echo {msg}")
     elif match := re.fullmatch(r"/files/(.+)", path):
         p = Path(GLOBALS["DIR"]) / match.group(1)
@@ -64,21 +72,23 @@ async def handle_connection(reader: StreamReader, writer: StreamWriter) -> None:
             writer.write(
                 make_response(
                     200,
-                    {"Content-Type": "application/octet-stream"},
+                    {"Content-Type": "application/octet-stream", **response_headers},
                     p.read_text(),
                 )
             )
         elif method.upper() == "POST":
             p.write_bytes(body.encode())
-            writer.write(make_response(201))
+            writer.write(make_response(201, response_headers))
         else:
-            writer.write(make_response(404))
+            writer.write(make_response(404, response_headers))
         stderr(f"[OUT] file {path}")
     else:
-        writer.write(make_response(404, {}, ""))
+        writer.write(make_response(404, response_headers, ""))
         stderr(f"[OUT] 404")
 
+    await writer.drain()
     writer.close()
+    await writer.wait_closed()
 
 async def main():
     parser = argparse.ArgumentParser()
